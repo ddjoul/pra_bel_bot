@@ -1,3 +1,4 @@
+import json
 import asyncio
 import logging
 import os
@@ -323,11 +324,88 @@ async def on_startup(bot: Bot):
 async def health(request: web.Request):
     return web.Response(text='pra.bel bot is running')
 
+# ─── уведомление автору о новом каментарыі ────────────────
+COMMENT_WEBHOOK_SECRET = os.getenv('COMMENT_WEBHOOK_SECRET', '').strip()
+ANON_AUTHOR_ID = '56c59442-7c14-494e-a07e-9722efb5483f'  # профіль «Ананім»
+
+async def comment_webhook(request: web.Request):
+    if COMMENT_WEBHOOK_SECRET:
+        hdr = (request.headers.get('x-webhook-secret') or '').strip()
+        if hdr != COMMENT_WEBHOOK_SECRET:
+            return web.json_response({'error': 'unauthorized'}, status=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({'error': 'bad_json'}, status=400)
+
+    record = data.get('record') or {}
+    post_id       = record.get('post_id')
+    display_name  = (record.get('display_name') or '').strip()
+    body          = (record.get('body') or '').strip()
+    if not post_id or not body:
+        return web.json_response({'ok': True, 'skipped': 'incomplete'})
+
+    # 1. пост і яго аўтар
+    try:
+        posts = await query(lambda: db.table('posts')
+                            .select('id,author_id,title')
+                            .eq('id', post_id).limit(1))
+    except Exception as e:
+        logging.error('comment_webhook: posts: %s', e)
+        return web.json_response({'error': 'db'}, status=500)
+    if not posts:
+        return web.json_response({'ok': True, 'skipped': 'no_post'})
+    post = posts[0]
+    author_id = post.get('author_id')
+    title     = post.get('title') or '***'
+
+    # 2. ананім — маўчым
+    if not author_id or author_id == ANON_AUTHOR_ID:
+        return web.json_response({'ok': True, 'skipped': 'anon'})
+    try:
+        authors = await query(lambda: db.table('authors')
+                              .select('id,nickname')
+                              .eq('id', author_id).limit(1))
+    except Exception:
+        authors = []
+    if authors and (authors[0].get('nickname') or '').lower() == 'anon':
+        return web.json_response({'ok': True, 'skipped': 'anon'})
+
+    # 3. усе telegram_id гэтага аўтара
+    try:
+        users = await query(lambda: db.table('telegram_users')
+                            .select('telegram_id')
+                            .eq('author_id', author_id))
+    except Exception as e:
+        logging.error('comment_webhook: users: %s', e)
+        return web.json_response({'error': 'db'}, status=500)
+    recipients = [u['telegram_id'] for u in (users or []) if u.get('telegram_id')]
+    if not recipients:
+        return web.json_response({'ok': True, 'skipped': 'no_telegram'})
+
+    # 4. рассылка
+    text = (
+        'вам прыйшоў новы каментарый 🖤\n'
+        f'ад: {display_name or "ананім"}\n'
+        f'на твор: {title}\n'
+        f'uuid твора: {post_id}\n\n'
+        f'{body}'
+    )
+    sent = 0
+    for tg in recipients:
+        try:
+            await bot.send_message(tg, text)
+            sent += 1
+        except Exception as e:
+            logging.warning('comment_webhook: send to %s: %s', tg, e)
+    return web.json_response({'ok': True, 'sent': sent})
+
 def main():
     logging.basicConfig(level=logging.WARNING)
     app = web.Application()
     app.router.add_get('/', health)
     app.router.add_get('/health', health)
+    app.router.add_post('/webhook/comment', comment_webhook)
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
