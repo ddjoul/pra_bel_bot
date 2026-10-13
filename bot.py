@@ -53,6 +53,9 @@ main_menu = ReplyKeyboardMarkup(
     input_field_placeholder='напішы паведамленне або абяры дзеянне',
 )
 
+BROADCAST_ADMIN_ID = int(os.getenv('BROADCAST_ADMIN_ID', '0'))
+broadcast_pending = {}
+
 async def query(build):
     async with db_lock:
         return await asyncio.to_thread(lambda: build().execute().data)
@@ -183,6 +186,37 @@ async def identity(m: Message):
         await register(m.from_user)
         await m.answer(f'твой Telegram ID: {m.from_user.id}\nдашлі яго адміністратару для прывязкі профілю.', reply_markup=main_menu)
 
+@dp.message(Command('broadcast'))
+async def broadcast(m: Message):
+    if m.chat.type != 'private':
+        return
+    if not BROADCAST_ADMIN_ID or m.from_user.id != BROADCAST_ADMIN_ID:
+        await m.answer('недаступна.')
+        return
+
+    parts = (m.text or '').split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await m.answer(
+            'фармат: /broadcast <тэкст>\n'
+            'прыклад: /broadcast прывітанне, сябры!'
+        )
+        return
+
+    text = parts[1].strip()
+
+    rows = await query(lambda: db.table('telegram_users').select('telegram_id'))
+    total = len(rows or [])
+    await m.answer(
+        f'гатова даслаць {total} карыстальнікам. пацвердзіць?',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text='так, даслаць', callback_data='bcast_yes'),
+            InlineKeyboardButton(text='адмена', callback_data='bcast_no'),
+        ]])
+    )
+    broadcast_pending[m.from_user.id] = text
+
+
+
 @dp.message(Command('cancel'))
 @dp.message(F.text == 'скасаваць')
 async def cancel(m: Message):
@@ -200,6 +234,37 @@ async def callback(c: CallbackQuery):
     await c.answer()
     if not c.message or c.message.chat.type != 'private':
         return
+
+    # ── broadcast: подтверждение ──
+    if c.data == 'bcast_yes' and c.from_user.id == BROADCAST_ADMIN_ID:
+        text = broadcast_pending.pop(c.from_user.id, None)
+        if not text:
+            await bot.send_message(c.from_user.id, 'няма тэксту.')
+            return
+        rows = await query(lambda: db.table('telegram_users').select('telegram_id'))
+        sent, failed = 0, 0
+        for r in (rows or []):
+            tg = r.get('telegram_id')
+            if not tg:
+                continue
+            try:
+                await bot.send_message(tg, text)
+                sent += 1
+            except Exception as e:
+                failed += 1
+                logging.warning('broadcast to %s: %s', tg, e)
+            await asyncio.sleep(0.05)
+        await bot.send_message(
+            c.from_user.id,
+            f'даслана: {sent}\nпамылак: {failed}'
+        )
+        return
+
+    if c.data == 'bcast_no' and c.from_user.id == BROADCAST_ADMIN_ID:
+        broadcast_pending.pop(c.from_user.id, None)
+        await bot.send_message(c.from_user.id, 'адменена.')
+        return
+
     async with locks[c.from_user.id]:
         d = await get_draft(c.from_user.id)
         token, sep, action = c.data.partition(':')
@@ -252,7 +317,7 @@ async def callback(c: CallbackQuery):
             return
         await save(d)
         await prompt(c.from_user.id, d)
-
+        
 @dp.message()
 async def text(m: Message):
     if m.chat.type != 'private':
