@@ -25,6 +25,7 @@ missing = [k for k in required if not os.getenv(k, '').strip()]
 if missing:
     raise SystemExit('Добавь в Render Environment: ' + ', '.join(missing))
 
+SITE_BASE_URL = os.environ['SITE_BASE_URL'].strip().rstrip('/')
 WEBHOOK_URL = os.environ['WEBHOOK_URL'].strip().rstrip('/')
 WEBHOOK_SECRET = os.environ['WEBHOOK_SECRET'].strip()
 WEBHOOK_PATH = '/telegram/webhook'
@@ -384,11 +385,12 @@ async def comment_webhook(request: web.Request):
         return web.json_response({'ok': True, 'skipped': 'no_telegram'})
 
     # 4. рассылка
+    post_url = f'{SITE_BASE_URL}/post.html?id={post_id}'
     text = (
         'вам прыйшоў новы каментарый 🖤\n'
         f'ад: {display_name or "ананім"}\n'
         f'на твор: {title}\n'
-        f'uuid твора: {post_id}\n\n'
+        f'{post_url}\n\n'
         f'{body}'
     )
     sent = 0
