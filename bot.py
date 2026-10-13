@@ -1,11 +1,13 @@
 import json
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import re
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from aiohttp import web
@@ -328,7 +330,123 @@ async def health(request: web.Request):
 # ─── уведомление автору о новом каментарыі ────────────────
 COMMENT_WEBHOOK_SECRET = os.getenv('COMMENT_WEBHOOK_SECRET', '').strip()
 ANON_AUTHOR_ID = '56c59442-7c14-494e-a07e-9722efb5483f'  # профіль «Ананім»
+SESSION_TTL_DAYS = 30
+ALLOWED_ORIGIN = os.getenv('ALLOWED_ORIGIN', SITE_BASE_URL).strip()
 
+def _check_tg_hash(data: dict) -> bool:
+    check = {k: v for k, v in data.items() if k != 'hash'}
+    check_str = '\n'.join(f'{k}={check[k]}' for k in sorted(check))
+    secret = hashlib.sha256(bot.token.encode()).digest()
+    expected = hmac.new(secret, check_str.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, str(data.get('hash', '')))
+
+def _bearer(request: web.Request):
+    hdr = request.headers.get('Authorization', '')
+    if not hdr.lower().startswith('bearer '):
+        return None
+    t = hdr[7:].strip()
+    return t if re.fullmatch(r'[0-9a-fA-F-]{36}', t) else None
+
+async def _current_user(request: web.Request):
+    token = _bearer(request)
+    if not token:
+        return None
+    rows = await query(lambda: db.table('web_sessions')
+                       .select('telegram_id,expires_at').eq('token', token).limit(1))
+    if not rows:
+        return None
+    row = rows[0]
+    try:
+        exp = datetime.fromisoformat(row['expires_at'].replace('Z', '+00:00'))
+        if exp <= datetime.now(timezone.utc):
+            await query(lambda: db.table('web_sessions').delete().eq('token', token))
+            return None
+    except Exception:
+        return None
+    users = await query(lambda: db.table('telegram_users')
+                        .select('telegram_id,display_name,author_id,is_approved')
+                        .eq('telegram_id', row['telegram_id']).limit(1))
+    if not users:
+        return None
+    u = users[0]
+    u['token'] = token
+    return u
+
+async def tg_callback(request: web.Request):
+    params = dict(request.query)
+    if not _check_tg_hash(params):
+        return web.Response(status=403, text='hash check failed')
+    try:
+        tg_id = int(params['id'])
+    except (KeyError, ValueError):
+        return web.Response(status=400, text='bad id')
+    users = await query(lambda: db.table('telegram_users')
+                        .select('telegram_id,is_approved')
+                        .eq('telegram_id', tg_id).limit(1))
+    if not users:
+        return web.HTTPFound(SITE_BASE_URL + '/?auth=need_bot')
+    if not users[0].get('is_approved'):
+        return web.HTTPFound(SITE_BASE_URL + '/?auth=not_approved')
+    token = str(uuid.uuid4())
+    expires = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
+    await query(lambda: db.table('web_sessions').insert({
+        'token': token, 'telegram_id': tg_id, 'expires_at': expires.isoformat(),
+    }))
+    return web.HTTPFound(SITE_BASE_URL + '/auth.html#token=' + token)
+
+async def api_me(request: web.Request):
+    u = await _current_user(request)
+    if not u:
+        return web.json_response({'error': 'unauthorized'}, status=401)
+    return web.json_response({
+        'telegram_id': u['telegram_id'],
+        'display_name': u.get('display_name'),
+        'author_id': u.get('author_id'),
+    })
+
+async def api_logout(request: web.Request):
+    t = _bearer(request)
+    if t:
+        await query(lambda: db.table('web_sessions').delete().eq('token', t))
+    return web.json_response({'ok': True})
+
+async def api_comments(request: web.Request):
+    u = await _current_user(request)
+    if not u:
+        return web.json_response({'error': 'unauthorized'}, status=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({'error': 'bad_json'}, status=400)
+    post_id = (data.get('post_id') or '').strip()
+    display_name = (data.get('display_name') or '').strip()
+    body = (data.get('body') or '').strip()
+    if not post_id or not display_name or not body:
+        return web.json_response({'error': 'missing'}, status=400)
+    if len(display_name) > 60 or len(body) > 2000:
+        return web.json_response({'error': 'too_long'}, status=400)
+    st = await query(lambda: db.table('comment_statuses').select('id').eq('code', 'published').limit(1))
+    if not st:
+        return web.json_response({'error': 'status_missing'}, status=500)
+    rows = await query(lambda: db.table('comments').insert({
+        'post_id': post_id, 'display_name': display_name, 'body': body,
+        'status': 'published', 'status_id': st[0]['id'],
+    }))
+    return web.json_response({'ok': True, 'id': rows[0]['id'] if rows else None})
+
+@web.middleware
+async def cors_mw(request, handler):
+    if request.method == 'OPTIONS':
+        return web.Response(headers={
+            'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Max-Age': '86400',
+        })
+    resp = await handler(request)
+    resp.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+    resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return resp
 async def comment_webhook(request: web.Request):
     if COMMENT_WEBHOOK_SECRET:
         hdr = (request.headers.get('x-webhook-secret') or '').strip()
@@ -406,10 +524,14 @@ async def comment_webhook(request: web.Request):
 
 def main():
     logging.basicConfig(level=logging.WARNING)
-    app = web.Application()
+    app = web.Application(middlewares=[cors_mw])
     app.router.add_get('/', health)
     app.router.add_get('/health', health)
     app.router.add_post('/webhook/comment', comment_webhook)
+    app.router.add_get('/api/tg/callback', tg_callback)
+    app.router.add_get('/api/me', api_me)
+    app.router.add_post('/api/logout', api_logout)
+    app.router.add_post('/api/comments', api_comments)
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
