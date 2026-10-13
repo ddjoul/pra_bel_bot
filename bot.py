@@ -428,10 +428,22 @@ async def api_comments(request: web.Request):
     st = await query(lambda: db.table('comment_statuses').select('id').eq('code', 'published').limit(1))
     if not st:
         return web.json_response({'error': 'status_missing'}, status=500)
-    rows = await query(lambda: db.table('comments').insert({
-        'post_id': post_id, 'display_name': display_name, 'body': body,
-        'status': 'published', 'status_id': st[0]['id'],
-    }))
+    parent_id = (data.get('parent_id') or '').strip() or None
+    if parent_id and not re.fullmatch(r'[0-9a-fA-F-]{36}', parent_id):
+        return web.json_response({'error': 'bad_parent'}, status=400)
+
+    payload = {
+        'post_id': post_id,
+        'display_name': display_name,
+        'body': body,
+        'status': 'published',
+        'status_id': st[0]['id'],
+        'author_telegram_id': u['telegram_id'],
+    }
+    if parent_id:
+        payload['parent_id'] = parent_id
+
+    rows = await query(lambda: db.table('comments').insert(payload))
     return web.json_response({'ok': True, 'id': rows[0]['id'] if rows else None})
 
 @web.middleware
@@ -500,14 +512,30 @@ async def comment_webhook(request: web.Request):
     except Exception as e:
         logging.error('comment_webhook: users: %s', e)
         return web.json_response({'error': 'db'}, status=500)
-    recipients = [u['telegram_id'] for u in (users or []) if u.get('telegram_id')]
+    recipients = {u['telegram_id'] for u in (users or []) if u.get('telegram_id')}
+
+    # Если это ответ — добавляем автора родительского комментария.
+    parent_id = record.get('parent_id')
+    if parent_id:
+        try:
+            parents = await query(lambda: db.table('comments')
+                                  .select('author_telegram_id,display_name')
+                                  .eq('id', parent_id).limit(1))
+            if parents and parents[0].get('author_telegram_id'):
+                recipients.add(parents[0]['author_telegram_id'])
+        except Exception as e:
+            logging.warning('comment_webhook: parent lookup: %s', e)
+
     if not recipients:
         return web.json_response({'ok': True, 'skipped': 'no_telegram'})
 
     # 4. рассылка
     post_url = f'{SITE_BASE_URL}/post.html?id={post_id}'
+    prefix = 'вам прыйшоў новы каментарый 🖤'
+    if parent_id:
+        prefix = 'вам адказалі на каментарый 🖤'
     text = (
-        'вам прыйшоў новы каментарый 🖤\n'
+        prefix + '\n'
         f'ад: {display_name or "ананім"}\n'
         f'на твор: {title}\n'
         f'{post_url}\n\n'
