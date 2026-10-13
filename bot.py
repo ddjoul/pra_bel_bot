@@ -340,6 +340,8 @@ async def comment_webhook(request: web.Request):
         return web.json_response({'error': 'bad_json'}, status=400)
 
     record = data.get('record') or {}
+    if (record.get('status') or '') != 'published':
+        return web.json_response({'ok': True, 'skipped': 'not_published'})
     post_id       = record.get('post_id')
     display_name  = (record.get('display_name') or '').strip()
     body          = (record.get('body') or '').strip()
