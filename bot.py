@@ -450,8 +450,6 @@ async def tg_callback(request: web.Request):
                         .eq('telegram_id', tg_id).limit(1))
     if not users:
         return web.HTTPFound(SITE_BASE_URL + '/?auth=need_bot')
-    if not users[0].get('is_approved'):
-        return web.HTTPFound(SITE_BASE_URL + '/?auth=not_approved')
     token = str(uuid.uuid4())
     expires = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
     await query(lambda: db.table('web_sessions').insert({
