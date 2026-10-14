@@ -40,8 +40,17 @@ async def list_authors(request):
 async def update_author(request):
     aid = str(uuid.UUID(request.match_info['id']))
     async with edit_lock:
-        await owned(request, aid)
+        _, current = await owned(request, aid)
         data = await request.json()
+        if isinstance(data, dict) and set(data) == {'remove_avatar'} and data['remove_avatar'] is True:
+            def remove():
+                q = core.db.table('authors').update({'avatar_path': None}).eq('id', aid)
+                previous = current.get('avatar_path')
+                return q.is_('avatar_path', 'null') if previous is None else q.eq('avatar_path', previous)
+            rows = await core.query(remove)
+            if not rows:
+                raise web.HTTPConflict(text='avatar_changed_refresh')
+            return web.json_response({'author': rows[0], 'avatar_path': None})
         if not isinstance(data, dict) or not data or set(data) - set(LIMITS):
             raise web.HTTPBadRequest(text='invalid_fields')
         patch = {}
