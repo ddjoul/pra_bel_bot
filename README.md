@@ -1,96 +1,69 @@
-# пра.бел — Telegram bot (starter implementation)
+# пра.бел — Telegram-бот и HTTP API
 
-Python 3.11 or newer. Run ONE instance. This is generated starter code,
-not integration-tested against your live Supabase or Telegram account.
+## Поддерживаемый запуск
 
-## Files
-- bot.py: Belarusian dialogue, durable drafts, multi-message poems.
-- setup.sql: new protected tables + transactional submission function.
-- admin_examples.sql: manual linking, approval and publication examples.
-- .env.example: configuration template, no real credentials.
+Python 3.11 или новее. Запускайте один экземпляр сервиса.
 
-## Setup
-1. Back up the database and review setup.sql. Run it ONCE in Supabase SQL Editor.
-   It enables RLS on posts and creates telegram_users, telegram_drafts and
-   telegram_submit. Existing posts/authors/policies are not deleted.
-   The provided SELECT policy exposes only status=published when RLS is enabled.
-   Do not apply a second time: tables/functions already exist after success.
-2. Create a bot with @BotFather: /newbot. Keep the token private.
-3. Copy .env.example to .env and enter the token and Supabase SERVER secret key
-   (or legacy service_role key). Not an anon/publishable key.
-4. Run commands in a separate bot folder, not your website's deployed assets:
+```sh
+python -m venv .venv
+# Linux/macOS: source .venv/bin/activate
+# Windows Git Bash: source .venv/Scripts/activate
+python -m pip install -r requirements.txt
+python account_server.py
+```
 
-   python -m venv .venv
+В Render Start Command: `python account_server.py`.
 
-   Git Bash on Windows:
-   source .venv/Scripts/activate
+`bot.py` и `start_bot.py` — внутренние модули, а не поддерживаемые команды запуска. Не запускайте их напрямую: альтернативные main-функции пока остаются в коде, и запуск `bot.py` обходит обёртку проверки подтверждения аккаунта и частоты комментариев. Исправление документации само по себе не блокирует такой запуск.
 
-   Linux/macOS:
-   source .venv/bin/activate
+## Структура
 
-   python -m pip install -r requirements.txt
-   python bot.py
+- `account_server.py`: поддерживаемая сборка приложения, HTTP API кабинета, аватары и оценки стихов.
+- `start_bot.py`: расширение Telegram-диалога для статей и хэштегов, проверка свежести Telegram-входа, обёртка API комментариев.
+- `bot.py`: базовый диалог, черновики, работа с Supabase, сессии и webhook уведомлений.
+- `setup.sql`: историческая начальная схема бота; не является актуальным полным описанием production. Не применяйте её поверх рабочей базы.
+- `supabase/`: архивирование защитных миграций; пока не полный baseline базы. См. `supabase/README.md`.
 
-   If python is not recognized on Windows, try py -3 instead.
+## Конфигурация
 
-5. In Telegram send /id. Link the actual numeric ID to the existing author
-   using admin_examples.sql after verifying identity.
-   Test using both approved and unapproved accounts before real submissions.
+Задавайте значения в Render Environment либо в локальном `.env`, который нельзя коммитить.
 
-## Dialogue
-/start resumes the current draft, /new replaces it (old unfinished draft lost),
-/cancel cancels, /id displays numeric user ID.
+- `BOT_TOKEN`: токен публичного Telegram-бота.
+- `SUPABASE_URL`: URL проекта.
+- `SUPABASE_SECRET_KEY`: серверный ключ Supabase, не publishable/anon.
+- `SITE_BASE_URL`: HTTPS-адрес сайта, без завершающего слеша.
+- `WEBHOOK_URL`: HTTPS-адрес сервиса, без `/telegram/webhook`.
+- `WEBHOOK_SECRET`: секрет Telegram webhook, 32–256 символов из букв ASCII, цифр, `_` и `-`.
+- `COMMENT_WEBHOOK_SECRET`: секрет webhook комментариев; должен совпадать с заголовком `x-webhook-secret` в настройках отправителя. Если он отсутствует или неверен, обработчик возвращает 401.
+- `ALLOWED_ORIGIN`: разрешённый origin сайта; по умолчанию `SITE_BASE_URL`.
+- `BROADCAST_ADMIN_ID`: числовой Telegram ID администратора рассылки; по умолчанию 0, рассылка отключена.
+- `PORT`: порт HTTP-сервера; по умолчанию 10000.
 
-Poem: type -> language -> title or *** -> text chunks -> Done -> review -> Send.
-Translation: type -> original language -> target language -> original author
-(or unknown author) -> title -> text -> review -> Send.
-Language options come from your languages table. Original_language stores the
-language CODE, e.g. en. Adapt the website display if it expects a human label.
-Each text chunk is joined with TWO newlines; within chunks whitespace is preserved.
-Maximum title/original author 200 characters, display name 100, poem 60000.
-Review is plain text: no Markdown parsing, so *** and special characters survive.
+Не публикуйте значения токенов, серверных ключей и webhook-секретов.
 
-## Author identity
-Existing authors are NEVER linked automatically by @username or claimed name.
-Administrator links them using numeric Telegram ID. Do this before the first
-submission to avoid creating an extra profile.
-For an unlinked user the bot asks for a display name and creates a NEW authors
-row at submission, with is_approved=false by default. This does NOT verify the
-person's identity. Such a profile is publicly readable under your existing
-Read public authors policy, even while its post is draft. If you require fully
-private profile review, change this workflow before deployment.
-The translator is posts.author_id; original author is posts.original_author.
+## Комментарии
 
-## Submission safety
-The RPC reads is_approved at final submission, within the same database transaction
-as the post insert. It uses lookup tables for ids, not hardcoded status ids.
-Approved: published + timestamp. Everyone else: draft + null published_at.
-Draft UUID is also post UUID. Repeating Send returns the existing result instead
-of inserting twice. This only deduplicates one draft, not separately recreated poems.
-Drafts survive restarts. Both new bot tables deny anon/authenticated access;
-RPC execute is restricted to service_role. Secret credentials never enter HTML.
-Existing database triggers were not provided; test the insert behavior in staging.
+При поддерживаемом запуске `/api/comments` проверяет сессию и `is_approved`, опубликованный пост, опубликованный корневой родительский комментарий того же поста и интервал 20 секунд между комментариями пользователя. Затем обёртка вызывает базовый обработчик вставки. Дублирование этих реализаций ещё не устранено.
 
-## Moderation and hosting
-Moderation is MANUAL in Supabase using the examples, not Telegram admin buttons.
-There are no moderator notifications or publication notifications in this version.
-Users can submit drafts even when not approved.
-Long polling needs a running process; closing the terminal stops the bot.
-GitHub Pages cannot run this Python service. Use an always-on worker/server.
-Generated code has no per-user quota/spam protection, so add it before a large
-public launch. Logs deliberately omit submitted text, tokens and request dumps.
+На сайте гостевые комментарии и комментарии неподтверждённых аккаунтов идут отдельным путём: прямая вставка pending в Supabase с проверками RLS. Этот путь остаётся без серверного ограничения частоты и CAPTCHA; работа над антиспамом отложена. Не считайте интервал API защитой гостевого пути.
 
-## Secrets
-Never commit .env. If placing this folder in an existing repository, merge the
-provided ignore patterns into the root .gitignore. .gitignore does not remove
-secrets already tracked: rotate any leaked credentials.
+Гостевые комментарии проходят модерацию. Telegram-уведомление об ответе гостю не отправляется; ответ читается на сайте. Webhook уведомлений обрабатывает опубликованные комментарии.
 
-## Minimum test checklist
-- unapproved: post is draft, published_at null, absent from anon SELECT.
-- approved: post published immediately with correct author.
-- translation: source and target codes correct, translator and original distinct.
-- untitled: title exactly ***; stanza spacing intact.
-- restart midway: /start resumes.
-- double Send: one posts row.
-- anon cannot read telegram_users/drafts or invoke telegram_submit.
-- a different user's username/name cannot claim an existing author profile.
+## Материалы и аккаунты
+
+Бот поддерживает стихи, переводы и статьи. Возможность отправлять статьи проверяется отдельно. Правила финальной отправки определяет рабочая функция `telegram_submit` в базе; исторический `setup.sql` может отличаться от неё.
+
+В текущей рабочей функции немедленная публикация литературного произведения требует подтверждённого аккауннта, неанонимного авторства и не менее 10 опубликованных литературных произведений выбранного автора. Остальные отправки идут в draft.
+
+Профили привязываются администратором по проверенному числовому Telegram ID, а не по заявленному имени или username. Кабинет позволяет подтверждённым пользователям редактировать принадлежащие им неанонимные профили. Модерация выполняется отдельным проектом `admin_bot_pra_bel`.
+
+## Проверка перед публикацией
+
+- Проверить запуск `account_server.py` и health endpoint.
+- Проверить API комментариев с отсутствующей, истёкшей, неподтверждённой и подтверждённой сессией.
+- Проверить повторный комментарий раньше 20 секунд и неверного родителя.
+- Проверить гостевую отправку, модерацию и отсутствие Telegram-уведомления гостю.
+- Проверить, что публичные роли не читают `author_telegram_id`, `web_sessions`, `telegram_users` и `telegram_drafts`.
+- Проверить webhook без заголовка, с неверным и с правильным секретом без ненужной рассылки реальным пользователям.
+
+Документация не заменяет тесты развёрнутого сервиса.
