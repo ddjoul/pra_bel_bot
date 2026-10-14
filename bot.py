@@ -523,10 +523,9 @@ async def cors_mw(request, handler):
     resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return resp
 async def comment_webhook(request: web.Request):
-    if COMMENT_WEBHOOK_SECRET:
-        hdr = (request.headers.get('x-webhook-secret') or '').strip()
-        if hdr != COMMENT_WEBHOOK_SECRET:
-            return web.json_response({'error': 'unauthorized'}, status=401)
+    hdr = (request.headers.get('x-webhook-secret') or '').strip()
+    if not COMMENT_WEBHOOK_SECRET or not hmac.compare_digest(hdr.encode('utf-8'), COMMENT_WEBHOOK_SECRET.encode('utf-8')):
+        return web.json_response({'error': 'unauthorized'}, status=401)
     try:
         data = await request.json()
     except Exception:
