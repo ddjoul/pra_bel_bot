@@ -1,22 +1,24 @@
+if __name__ == '__main__':
+    raise SystemExit('Use python account_server.py; start_bot.py is an internal module.')
+
 import asyncio
 import io
 import re
 import uuid
 import warnings
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from functools import partial
 from PIL import Image
-from aiohttp import web
 from aiogram import F
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramBadRequest
 import bot as core
+from comment_api import api_comments
 
 CATEGORIES = {'poem': 'верш', 'translation': 'пераклад', 'news': 'навіна', 'culture': 'артыкул пра культуру', 'language': 'артыкул пра мову', 'idea': 'ідэя'}
 ARTICLES = {'news', 'culture', 'language', 'idea'}
 old_prompt = core.prompt
-old_comments = core.api_comments
 old_hash_check = core._check_tg_hash
-comment_locks = {}
 Image.MAX_IMAGE_PIXELS = 20000000
 
 async def allowed_articles(uid):
@@ -197,36 +199,4 @@ def fresh_hash(data):
     return -60 <= age <= 86400 and old_hash_check(data)
 
 core._check_tg_hash = fresh_hash
-
-async def approved_comments(request):
-    u = await core._current_user(request)
-    if not u:
-        return web.json_response({'error': 'unauthorized'}, status=401)
-    if not u.get('is_approved'):
-        return web.json_response({'error': 'approval_required'}, status=403)
-    async with comment_locks.setdefault(u['telegram_id'], asyncio.Lock()):
-        try:
-            data = await request.json()
-            post_id = str(uuid.UUID(data.get('post_id', '')))
-            parent_id = str(uuid.UUID(data['parent_id'])) if data.get('parent_id') else None
-            if not isinstance(data.get('display_name'), str) or not isinstance(data.get('body'), str):
-                raise ValueError()
-        except (ValueError, TypeError, AttributeError, KeyError):
-            return web.json_response({'error': 'invalid_comment'}, status=400)
-        posts = await core.query(lambda: core.db.table('posts').select('id').eq('id', post_id).eq('status', 'published').limit(1))
-        if not posts:
-            return web.json_response({'error': 'post_not_found'}, status=404)
-        if parent_id:
-            parents = await core.query(lambda: core.db.table('comments').select('id,parent_id').eq('id', parent_id).eq('post_id', post_id).eq('status', 'published').limit(1))
-            if not parents or parents[0].get('parent_id'):
-                return web.json_response({'error': 'invalid_parent'}, status=400)
-        since = (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat()
-        recent = await core.query(lambda: core.db.table('comments').select('id').eq('author_telegram_id', u['telegram_id']).gte('created_at', since).limit(1))
-        if recent:
-            return web.json_response({'error': 'wait_before_next_comment'}, status=429)
-        return await old_comments(request)
-
-core.api_comments = approved_comments
-
-if __name__ == '__main__':
-    core.main()
+core.api_comments = partial(api_comments, core=core)
